@@ -32,6 +32,7 @@ public class DeviceInfoHook {
     private static String cachedDeviceId = null;
     private static String cachedSerial = null;
     private static String cachedAndroidId = null;
+    private static boolean httpAgentLogged = false;
 
     public static void hook(XC_LoadPackage.LoadPackageParam lpparam) {
         if (!HookConfig.ENABLE_DEVICE_SPOOF) return;
@@ -122,6 +123,41 @@ public class DeviceInfoHook {
                     }
                 }
             });
+
+        hookHttpAgent();
+    }
+
+    /**
+     * AOSP RuntimeInit.commonInit() 会在 zygote fork 时就把 http.agent 算成一个静态
+     * 字符串，内容为：
+     *   "Dalvik/" + System.getProperty("java.vm.version")
+     *           + " (Linux; U; Android " + Build.VERSION.RELEASE
+     *           + "; " + Build.MODEL + " Build/" + Build.ID + ")"
+     *
+     * 这个值早于本模块（Xposed）加载，所以只改 Build.MODEL 字段对已缓存的 UA 无效，
+     * HTTP 请求头里仍然带着真机机型——这是设备指纹最容易漏掉的一条通道。
+     *
+     * 在 System.getProperty 上拦截 "http.agent"，用已伪造的 Build 字段重新拼装，
+     * 一处修复即可让全部读取点（HTTP 主路径、小程序、广点通、Bugly、gatherer）收敛。
+     */
+    private static void hookHttpAgent() {
+        if (!HookConfig.ENABLE_DEVICE_SPOOF) return;
+        HookUtils.hookAllMethods("java.lang.System", "getProperty", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                if (param.args.length == 0 || !(param.args[0] instanceof String)) return;
+                if (!"http.agent".equals(param.args[0])) return;
+
+                String ua = "Dalvik/" + System.getProperty("java.vm.version", "2.1.0")
+                    + " (Linux; U; Android " + Build.VERSION.RELEASE
+                    + "; " + Build.MODEL + " Build/" + Build.ID + ")";
+                if (!httpAgentLogged) {
+                    httpAgentLogged = true;
+                    XposedEntry.log("System.getProperty(http.agent) rebuilt -> " + ua);
+                }
+                param.setResult(ua);
+            }
+        });
     }
 
     private static void hookAndroidId() {
